@@ -316,7 +316,7 @@ class MacroRecorder:
             mouse_move_duration = 0.005
             
             # 키보드 입력 사이의 지연 시간 (키보드 입력을 더 안정적으로)
-            keyboard_delay = 0.05  # 50ms 지연
+            keyboard_delay = 0.1  # 100ms 지연
             
             # 대기 시간 압축을 제거하여 실제 기록된 시간대로 실행
             # speed_multiplier를 1.0으로 설정하면 원래 속도대로 실행됨
