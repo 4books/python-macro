@@ -926,7 +926,63 @@ class MacroRecorder:
             macro_name = macro_data["name"]
             self.safe_gui_update(lambda: setattr(self.status_var, 'value', f"매크로 '{macro_name}' 실행 중..."))
             
+<<<<<<< HEAD
             # 이벤트를 시간순으로 정렬
+=======
+            # 마우스 이동 시간을 직접 설정 (0.005초로 설정)
+            mouse_move_duration = 0.005
+            
+            # 키보드 입력 사이의 지연 시간 (키보드 입력을 더 안정적으로)
+            keyboard_delay = 0.1  # 100ms 지연
+            
+            # 대기 시간 압축을 제거하여 실제 기록된 시간대로 실행
+            # speed_multiplier를 1.0으로 설정하면 원래 속도대로 실행됨
+            speed_multiplier = 1.0  
+            
+            # 최대 대기 시간 (이전에는 0.1초로 제한했으나 제한 제거)
+            max_wait_time = None  # 제한 없음
+            
+            # 키보드 상태 추적을 위한 딕셔너리
+            pressed_keys = set()
+            
+            # 특수 키 매핑
+            special_keys = {
+                'shift': 'shift',
+                'ctrl': 'ctrl',
+                'alt': 'alt',
+                'hangul': 'hangul',  # 한/영 키
+                'han_yeong': 'hangul',  # 한/영 키 대체 이름
+                'hanyeong': 'hangul',   # 한/영 키 대체 이름
+                'ralt': 'hangul',  # 오른쪽 Alt 키
+                'rctrl': 'ctrlright',  # 오른쪽 Ctrl 키
+                'rshift': 'shiftright',  # 오른쪽 Shift 키
+                'lalt': 'alt',  # 왼쪽 Alt 키
+                'lctrl': 'ctrl',  # 왼쪽 Ctrl 키
+                'lshift': 'shift',  # 왼쪽 Shift 키
+                'capslock': 'capslock',  # CapsLock 키
+                'esc': 'escape',  # Escape 키
+                'space': 'space',  # Space 키
+                'tab': 'tab',  # Tab 키
+                'enter': 'enter',  # Enter 키
+                'backspace': 'backspace',  # Backspace 키
+                'delete': 'delete',  # Delete 키
+                'insert': 'insert',  # Insert 키
+                'home': 'home',  # Home 키
+                'end': 'end',  # End 키
+                'pageup': 'pageup',  # Page Up 키
+                'pagedown': 'pagedown',  # Page Down 키
+                'up': 'up',  # 위쪽 화살표
+                'down': 'down',  # 아래쪽 화살표
+                'left': 'left',  # 왼쪽 화살표
+                'right': 'right',  # 오른쪽 화살표
+            }
+            
+            # 마우스 위치 최적화를 위한 변수
+            last_mouse_x, last_mouse_y = None, None
+            
+            # 마우스/키보드 이벤트 처리 (최적화 제거하고 원래 순서대로 실행)
+            # 모든 이벤트를 시간순으로 정렬
+>>>>>>> 6f0e4cc36dc834c8abdfd7317afaa57a72fdbb86
             sorted_events = sorted(events, key=lambda e: e["time"])
             
             if sorted_events:
