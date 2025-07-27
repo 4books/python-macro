@@ -104,6 +104,7 @@ class MacroRecorder:
             # 스케줄 실행 스레드
             self.schedule_thread = None
             self.is_schedule_running = False
+            self.schedule_health_check_thread = None  # 헬스체크 스레드 추가
             
             # GUI 초기화
             self.root = None
@@ -1326,6 +1327,10 @@ class MacroRecorder:
             self.schedule_thread.daemon = True
             self.schedule_thread.start()
             
+            # 헬스체크 스레드 추가
+            self.schedule_health_check_thread = threading.Thread(target=self._run_health_check, daemon=True)
+            self.schedule_health_check_thread.start()
+            
             self.log.info("스케줄러 시작 완료")
             
         except Exception as e:
@@ -1366,6 +1371,11 @@ class MacroRecorder:
                 else:
                     self.log.debug("스케줄러 스레드 종료 완료")
             
+            # 헬스체크 스레드 종료 대기
+            if self.schedule_health_check_thread and self.schedule_health_check_thread.is_alive():
+                self.log.debug("헬스체크 스레드 종료 대기 중...")
+                self.schedule_health_check_thread.join(timeout=2)
+            
             self.log.info("스케줄러 중지 완료")
             
         except Exception as e:
@@ -1405,10 +1415,11 @@ class MacroRecorder:
                         try:
                             hour, minute = map(int, time_str.split(":"))
                             
-                            # 스케줄 등록 (매일 반복)
-                            schedule.every().day.at(time_str).do(
-                                self.play_macro_scheduled, macro_path=macro_path
-                            )
+                            # 스케줄 등록 (매일 반복) - 더 안정적인 방법 사용
+                            def create_job(path):
+                                return lambda: self.play_macro_scheduled_safe(path)
+                            
+                            schedule.every().day.at(time_str).do(create_job(macro_path))
                             registered_count += 1
                             self.log.debug(f"스케줄 등록 완료: {macro_name} at {time_str}")
                             
@@ -1430,16 +1441,36 @@ class MacroRecorder:
         threading.Thread(target=self.update_scheduler_safe, daemon=True).start()
     
     def play_macro_scheduled(self, macro_path: str):
-        """스케줄에 의해 매크로 실행"""
+        """스케줄에 의해 매크로 실행 (기본 버전)"""
+        return self.play_macro_scheduled_safe(macro_path)
+    
+    def play_macro_scheduled_safe(self, macro_path: str):
+        """스케줄에 의해 매크로 실행 (안전한 버전) - 여러 스케줄 동시 실행 지원"""
         try:
-            self.log.info(f"스케줄된 매크로 실행: {macro_path}")
+            current_time = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            self.log.info(f"[{current_time}] 스케줄된 매크로 실행 시작: {macro_path}")
             
-            # 별도 스레드에서 매크로 실행
-            threading.Thread(
-                target=self.play_macro, 
-                args=(macro_path,),
-                daemon=True
-            ).start()
+            # 매크로 파일 존재 확인
+            if not os.path.exists(macro_path):
+                self.log.error(f"매크로 파일이 존재하지 않음: {macro_path}")
+                return False
+            
+            # 별도 스레드에서 매크로 실행 (여러 스케줄 동시 실행 가능)
+            def execute_macro():
+                try:
+                    macro_name = os.path.basename(macro_path)[:-5]  # .json 제거
+                    self.log.info(f"스케줄된 매크로 '{macro_name}' 실행 중...")
+                    
+                    self.play_macro(macro_path)
+                    
+                    next_run = datetime.datetime.now() + datetime.timedelta(days=1)
+                    self.log.info(f"스케줄된 매크로 '{macro_name}' 실행 완료. 다음 실행: {next_run.strftime('%Y-%m-%d %H:%M:%S')}")
+                except Exception as e:
+                    self.log.exception(f"스케줄된 매크로 실행 중 오류: {str(e)}")
+            
+            # 각 스케줄마다 독립적인 스레드에서 실행 (동시 실행 보장)
+            macro_thread = threading.Thread(target=execute_macro, daemon=True)
+            macro_thread.start()
             
             return True
             
@@ -1448,22 +1479,74 @@ class MacroRecorder:
             return False
     
     def _run_scheduler(self):
-        """스케줄러 실행 루프"""
+        """스케줄러 실행 루프 (개선된 버전)"""
         self.log.info("스케줄러 루프 시작")
+        
+        consecutive_errors = 0
+        max_consecutive_errors = 10
         
         while self.is_schedule_running:
             try:
                 # 예약된 작업 실행
                 schedule.run_pending()
+                consecutive_errors = 0  # 성공 시 오류 카운터 리셋
                 
                 # CPU 사용량 감소
                 time.sleep(1)
                 
             except Exception as e:
-                self.log.error(f"스케줄러 루프 오류: {str(e)}")
-                time.sleep(5)  # 오류 시 잠시 대기
+                consecutive_errors += 1
+                self.log.error(f"스케줄러 루프 오류 ({consecutive_errors}/{max_consecutive_errors}): {str(e)}")
+                
+                # 연속 오류가 너무 많으면 더 긴 대기
+                if consecutive_errors >= max_consecutive_errors:
+                    self.log.warning(f"연속 오류 {max_consecutive_errors}회 발생. 60초 대기 후 재시작...")
+                    time.sleep(60)
+                    consecutive_errors = 0
+                    
+                    # 스케줄 재등록 시도
+                    try:
+                        threading.Thread(target=self.update_scheduler_safe, daemon=True).start()
+                        self.log.info("스케줄 재등록 시도 완료")
+                    except Exception as re_error:
+                        self.log.error(f"스케줄 재등록 실패: {str(re_error)}")
+                else:
+                    time.sleep(5)  # 오류 시 잠시 대기
         
         self.log.info("스케줄러 루프 종료")
+    
+    def _run_health_check(self):
+        """스케줄러 헬스체크 (매 10분마다 스케줄 상태 확인)"""
+        self.log.info("스케줄러 헬스체크 시작")
+        
+        while self.is_schedule_running:
+            try:
+                time.sleep(600)  # 10분 대기
+                
+                if not self.is_schedule_running:
+                    break
+                
+                # 현재 등록된 스케줄 수 확인
+                current_jobs = len(schedule.jobs)
+                expected_jobs = len(self.schedules)
+                
+                self.log.debug(f"헬스체크: 현재 작업 {current_jobs}개, 예상 작업 {expected_jobs}개")
+                
+                # 스케줄이 누락된 경우 재등록
+                if current_jobs != expected_jobs:
+                    self.log.warning(f"스케줄 불일치 감지. 재등록 시도...")
+                    threading.Thread(target=self.update_scheduler_safe, daemon=True).start()
+                
+                # 다음 실행 예정 시간 로그
+                if schedule.jobs:
+                    next_run = schedule.next_run()
+                    if next_run:
+                        self.log.debug(f"다음 스케줄 실행 예정: {next_run}")
+                
+            except Exception as e:
+                self.log.error(f"헬스체크 오류: {str(e)}")
+        
+        self.log.info("스케줄러 헬스체크 종료")
     
     def update_macro_list(self):
         """매크로 목록 업데이트"""
@@ -1517,36 +1600,64 @@ class MacroRecorder:
             self.log.error(f"스케줄 목록 업데이트 오류: {str(e)}")
     
     def show_debug_info(self):
-        """디버그 정보 표시"""
+        """디버그 정보 표시 (테스트 정보 추가)"""
         try:
+            # 현재 스케줄 상태 정보
+            scheduled_jobs_info = []
+            if schedule.jobs:
+                for job in schedule.jobs:
+                    next_run = job.next_run.strftime("%Y-%m-%d %H:%M:%S") if job.next_run else "없음"
+                    time_until = ""
+                    if job.next_run:
+                        delta = job.next_run - datetime.datetime.now()
+                        total_seconds = int(delta.total_seconds())
+                        if total_seconds > 0:
+                            hours = total_seconds // 3600
+                            minutes = (total_seconds % 3600) // 60
+                            seconds = total_seconds % 60
+                            time_until = f" ({hours}시간 {minutes}분 {seconds}초 후)"
+                    
+                    scheduled_jobs_info.append(f"  - {str(job)}: {next_run}{time_until}")
+            else:
+                scheduled_jobs_info.append("  - 등록된 작업 없음")
+            
+            # 테스트 모드 상태
+            test_mode_status = "비활성"
+            
             info = f"""
 디버그 정보:
 - 관리자 권한: {'예' if ctypes.windll.shell32.IsUserAnAdmin() else '아니오'}
 - 현재 후킹 방법: {self.hook_method}
 - 녹화된 이벤트 수: {len(self.current_events) if self.current_events else 0}
 - 스케줄 수: {len(self.schedules)}
+- 등록된 스케줄 작업 수: {len(schedule.jobs)}
 - 스케줄러 실행 중: {'예' if self.is_schedule_running else '아니오'}
 - 녹화 중: {'예' if self.is_recording else '아니오'}
-- Python 버전: {os.sys.version}
-- 운영체제: {os.name}
-- 로그 파일: {self.log.log_file}
+- 현재 시간: {datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
+
+현재 등록된 스케줄 작업:
+{chr(10).join(scheduled_jobs_info)}
+
+스케줄 사용법:
+- 19:30으로 등록하면 매일 19:30에 실행됩니다
+- 여러 스케줄을 등록해도 모두 정상 작동합니다
 
 핫키 상태:
 - F11: 녹화 시작/중지
 - F12: 녹화 중지
-
-라이브러리 상태:
-- pywin32: 설치됨
-- keyboard: {'설치됨' if 'keyboard' in os.sys.modules else '확인 불가'}
-- pyautogui: {'설치됨' if 'pyautogui' in os.sys.modules else '확인 불가'}
-
-pynput 설치 확인:
 """
-            try:
-                import pynput
-                info += "- pynput: 설치됨\n"
-            except ImportError:
-                info += "- pynput: 설치되지 않음 (권장: pip install pynput)\n"
+            
+            # 다음 스케줄 실행 시간
+            if schedule.jobs:
+                next_run = schedule.next_run()
+                if next_run:
+                    delta = next_run - datetime.datetime.now()
+                    total_seconds = int(delta.total_seconds())
+                    if total_seconds > 0:
+                        hours = total_seconds // 3600
+                        minutes = (total_seconds % 3600) // 60
+                        seconds = total_seconds % 60
+                        info += f"\n⏰ 다음 실행: {next_run.strftime('%H:%M:%S')} ({hours}시간 {minutes}분 {seconds}초 후)"
             
             self.log.info("디버그 정보 표시됨")
             messagebox.showinfo("디버그 정보", info)
@@ -1612,7 +1723,8 @@ pynput 설치 확인:
             
             self.root = tk.Tk()
             self.root.title("Python 매크로 프로그램 (관리자 권한) - F11: 녹화 토글, F12: 중지")
-            self.root.geometry("900x700")
+            # 창 크기: 650x550으로 변경
+            self.root.geometry("650x500")
             
             # 변수 초기화
             self.recording_status = tk.StringVar(value="상태: 대기 중 (F11: 녹화 시작)")
@@ -1713,7 +1825,7 @@ pynput 설치 확인:
                      command=self.on_play_macro).pack(side=tk.LEFT, padx=5)
             ttk.Button(macro_control_frame, text="매크로 삭제", 
                      command=self.on_delete_macro).pack(side=tk.LEFT, padx=5)
-                    
+            
             # 스케줄 관리 탭 내용
             schedule_macro_frame = ttk.Frame(schedule_tab)
             schedule_macro_frame.pack(fill=tk.X, padx=5, pady=5)
@@ -1919,26 +2031,27 @@ pynput 설치 확인:
                 messagebox.showerror("오류", "매크로를 먼저 선택하세요.")
                 return
                 
-            time_str = self.schedule_time_entry.get().strip()
-            if not time_str:
-                self.log.warning("스케줄 추가 시 시간이 입력되지 않음")
+            time_input = self.schedule_time_entry.get().strip()
+            if not time_input:
                 messagebox.showerror("오류", "실행 시간을 입력하세요. (HH:MM)")
                 return
-                
+            
             # 시간 형식 확인
             try:
-                hour, minute = map(int, time_str.split(":"))
+                hour, minute = map(int, time_input.split(":"))
                 if not (0 <= hour < 24 and 0 <= minute < 60):
                     raise ValueError()
-                self.log.debug(f"시간 형식 검증 통과: {time_str}")
+                self.log.debug(f"시간 형식 검증 통과: {time_input}")
             except:
-                self.log.error(f"잘못된 시간 형식: {time_str}")
+                self.log.error(f"잘못된 시간 형식: {time_input}")
                 messagebox.showerror("오류", "시간 형식이 올바르지 않습니다. (HH:MM)")
                 return
             
-            self.log.info(f"스케줄 추가 시도: {selected_macro_name} at {time_str}")
-            if self.add_schedule(selected_macro_name, time_str):
-                messagebox.showinfo("알림", f"스케줄이 추가되었습니다: {selected_macro_name} - {time_str}")
+            # 스케줄 추가
+            if self.add_schedule(selected_macro_name, time_input):
+                messagebox.showinfo("알림", 
+                    f"스케줄이 추가되었습니다: {selected_macro_name} - {time_input}\n매일 {time_input}에 실행됩니다.")
+                
                 # 입력 필드 초기화
                 self.schedule_time_entry.delete(0, tk.END)
                 self.log.debug("스케줄 추가 완료 및 입력 필드 초기화")
